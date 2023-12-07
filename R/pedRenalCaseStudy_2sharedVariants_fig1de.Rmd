@@ -1,0 +1,65 @@
+---
+title: "Pediatric Renal Case Study - Shared Variant Analysis for Figures 1D and 1E"
+author: "Chloe Pacyna"
+date: "06/11/2023"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Generate VAF plot of clonal tumor mutations
+
+First, we'll load in the data and reorder them.
+```{r}
+vafs <- fread('/Users/cp19/PhD/Oncocytoma/pediatricOncoChromo_2023-04-03/seleMuts_Vafs_corrected.txt', header = T)
+vafs <- vafs[order(vafs$PD48545f_VAF, vafs$PD48545b_VAF, decreasing = T) ,]
+vafs$order <- 1:nrow(vafs)
+
+```
+
+Then we'll generate a plot of the tumors' shared variants.
+
+```{r}
+
+ggplot(vafs, aes(ymin = 0, ymax = 1, xmin = 1, ymin = 15)) +
+    geom_hline(yintercept = mean(meltVafCorrect[meltVafCorrect$sample %in% c('A','C','D','E'),]$correctedVAF)) + 
+  geom_point(aes(x=order, y = PD48545a_VAF_CNandPuritycorrected),  size = 4, fill = '#763256', shape = 21, colour = 'black', stroke = 1) + 
+  geom_point(aes(x=order, y = PD48545c_VAF_CNandPuritycorrected), size = 4, fill = '#9F6F88', shape = 21, colour = 'black', stroke = 1) + 
+  geom_point(aes(x=order, y = PD48545d_VAF_CNandPuritycorrected), size = 4, fill = '#325676', shape = 21, colour = 'black', stroke = 1) + 
+  geom_point(aes(x=order, y = PD48545e_VAF_CNandPuritycorrected), size = 4, fill = '#6F889F', shape = 21, colour = 'black', stroke = 1) + 
+  scale_y_continuous(name="VAF", limits=c(0, 1), breaks = c(0,.1,.2,.3,.4,.5,.6,.7,.8,.9,1)) +
+  scale_x_continuous(name = 'Mutation', breaks = c(1,5,10,15)) +
+  theme_classic()
+
+```
+
+## Generate VAF plot of normal kidney and blood
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+
+
+Using the corrected VAFs, we'll generate a plot of the 15 shared variants in the normal kidney sample.
+```{r}
+
+ggplot(vafs, aes(ymin = 0, ymax = .25, xmin = 1, ymin = 15)) +
+        geom_area(aes(x=order, y = PD48545b_VAF), fill = '#848C6F', aes = .1, colour = 'black', linetype = 1, size = 1.1) + geom_point(aes(x=order, y = PD48545b_VAF), size = 5) + geom_line(aes(x=order, y = PD48545b_VAF), color = 'black', size = 1.1) +
+  geom_point(data = vafs[vafs$PD48545b_VAF == 0,],aes(x=order, y = PD48545b_VAF), size = 3.5, colour = 'white') +
+    theme_classic()
+
+```
+
+And now we'll do the same thing for the blood sample.
+```{r}
+
+ggplot(vafs, aes(ymin = 0, ymax = .25, xmin = 1, ymin = 15)) +
+        geom_area(aes(x=order, y = PD48545f_VAF), fill = '#BDC99F', aes = .1, colour = 'black', linetype = 1, size = 1.1) + geom_point(aes(x=order, y = PD48545f_VAF), size = 5) + geom_line(aes(x=order, y = PD48545f_VAF), color = 'black', size = 1.1) +
+  geom_point(data = vafs[vafs$PD48545f_VAF == 0,],aes(x=order, y = PD48545f_VAF), size = 3.5, colour = 'white') +
+    theme_classic()
+
+```
+
+Together, those two plots generate figure 1E.

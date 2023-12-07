@@ -1,0 +1,5 @@
+all$tumorType
+oncocytoma
+oncocytoma
+chromophobe
+chromophobe

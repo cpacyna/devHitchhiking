@@ -1,0 +1,275 @@
+---
+title: "Pediatric Renal Case Study - Transcriptomic analysis"
+author: "Chloe Pacyna"
+date: "07/11/2023"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Load packages.
+```{r}
+library(DESeq2)
+library(data.table)
+library(apeglm)
+library(EnhancedVolcano)
+library(grid)
+library(gridExtra)
+library(dendextend)
+library(fgsea)
+library(reactome.db)
+library(ComplexHeatmap)
+library(biomaRt)
+```
+
+### Load in data
+Use lapply to load in data from *.counts.tsv files.
+
+```{r}
+
+counts <- data.frame(fread('~/PhD/Oncocytoma/pediatricBulkRNA/allCounts.txt'), row.names = 1)
+colnames(counts) <- c('PR48545a','PR48545b','PR48545c','PR48545d','PR48545e') # checked raw files, cols are correct
+
+metadata <- data.frame(fread('~/PhD/Oncocytoma/pediatricBulkRNA/PR48545a.converted_counts.tsv'), row.names = 1)
+
+# make coldata
+oncos <- c('PR48545a','PR48545d')
+chromos <- c('PR48545c','PR48545e')
+all <- as.data.frame(c(oncos, chromos)); colnames(all) <- 'Sample'
+all$tumorType <- ifelse(all$Sample %in% oncos, 'oncocytoma', 'chromophobe')
+all <- all[all$Sample %in% colnames(counts),]
+rownames(all) <- all$Sample
+coldata <- as.data.frame(all$tumorType); rownames(coldata) <- rownames(all)
+colnames(coldata) <- 'tumorType' 
+
+
+# select for samples we know about
+counts_sele <- counts[,rownames(coldata)]
+
+#must == true to work
+all(rownames(coldata) == colnames(counts_sele))
+
+```
+
+
+### Generate a normal panel
+```{r}
+
+kidney_gtex_samples <- fread('/Users/cp19/PhD/Oncocytoma/normal_panel/kidney_samples_cortex.txt', header = F)
+kidney_gtex_samples$patient <- sapply(strsplit(kidney_gtex_samples$V1, split = '-'),`[`,2)
+kidney_gtex_samples$SUBJID <- paste0('GTEX-',kidney_gtex_samples$patient)
+  
+  
+gtex_metadata <- fread('/Users/cp19/PhD/Oncocytoma/normal_panel/metadata.txt', header = T)
+
+kidney_gtex_sample_metadata <- merge(kidney_gtex_samples, gtex_metadata, by = 'SUBJID')
+
+# select 10 youngest female samples
+selected_gtex_samples <- kidney_gtex_sample_metadata[kidney_gtex_sample_metadata$SEX == '2' & kidney_gtex_sample_metadata$AGE %in% c('20-29','30-39','40-49','50-59'),]
+
+write.table(selected_gtex_samples, '/Users/cp19/PhD/Oncocytoma/normal_panel/young_female_gtex_patients.txt', quote = F, col.names = T, row.names = F, sep = '\t')
+
+gtex_kidney_reads <- as.data.frame(fread('/Users/cp19/PhD/Oncocytoma/normal_panel/gene_reads_2017-06-05_v8_kidney_cortex.gct'))
+truefalse_gtex <- names(gtex_kidney_reads) %in% selected_gtex_samples$V1
+gtex_kidney_reads <- gtex_kidney_reads[,c('id','Name','Description',selected_gtex_samples$V1)]
+gtex_kidney_reads$ensembl <- sapply(strsplit(gtex_kidney_reads$Name, split = '[.]'),`[`,1)
+
+```
+
+Combine our samples and the GTEx normal panel. 
+```{r}
+# remove genes that have no reads for any of the GTEX samples because they won't be helpful for the comparison
+gtex_kidney_reads <- gtex_kidney_reads[rowSums(gtex_kidney_reads[,grepl(c('GTEX'), colnames(gtex_kidney_reads) ),]) > 0,]
+
+# merge
+merged_counts <- merge(counts, gtex_kidney_reads, by.x = 0, by.y = 'ensembl')
+
+all_counts_gtex_ped <- merged_counts[,c('Row.names',names(counts),selected_gtex_samples$V1)]
+rownames(all_counts_gtex_ped) <- merged_counts$Row.names
+unique(all_counts_gtex_ped)
+
+all_counts_gtex_ped <- unique(all_counts_gtex_ped)
+all_counts_gtex_ped <- all_counts_gtex_ped[,grepl(c('PR|GTEX'), names(all_counts_gtex_ped))]
+
+
+```
+
+
+### Differential gene expression on combined count matrix of patient tumor samples and GTEx samples.
+
+Let's use DESeq2 while accounting for the two different batches (Sanger batch and GTEx batch).
+
+First, we'll prepare column data.
+```{r}
+
+# remake coldata for case and GTEx samples combined
+coldata_forNormPanel <- as.data.frame(colnames(all_counts_gtex_ped)) ; colnames(coldata_forNormPanel) <- 'sample'
+coldata_forNormPanel$batch <- ifelse(coldata_forNormPanel$sample %in% colnames(counts),'sanger','gtex')
+coldata_forNormPanel$tissue <- ifelse(coldata_forNormPanel$sample %in% c(oncos,chromos),'tumor','normal')
+
+# format coldata
+coldata <- as.data.frame(cbind(coldata_forNormPanel$batch,coldata_forNormPanel$tissue)); colnames(coldata) <- c('batch','tissue'); rownames(coldata) <- coldata_forNormPanel$sample
+
+```
+
+Then we'll actually run DESeq2.
+```{r}
+### deseq2
+# prep matrix
+dds_normPanel <- DESeqDataSetFromMatrix(countData = all_counts_gtex_ped,
+                              colData = coldata,
+                              design = ~ tissue + batch)
+
+# check matrix
+dds_normPanel
+
+# run deseq
+dds_normPanel <- DESeq(dds_normPanel)
+resultsNames(dds_normPanel)
+res_normPanel <- results(dds_normPanel, name='tissue_tumor_vs_normal')
+
+```
+
+Check for batch effect in non-corrected results...
+```{r}
+# 
+vsd_normPanel <- vst(dds_normPanel)
+
+plotPCA(vsd_normPanel, "batch")
+```
+
+As expected, looks like a batch effect!  Let's make sure we removed it properly.
+```{r}
+# remove batch
+assay(vsd_normPanel) <- limma::removeBatchEffect(assay(vsd_normPanel), vsd_normPanel$batch)
+
+# check for batch effect
+plotPCA(vsd_normPanel, "batch")
+
+```
+
+All better!
+
+Now we'll merge some metadata information into our result dataframe for downstream analysis.
+```{r}
+
+metadata$ensembl <- rownames(metadata)
+res_normPanel$ensembl <- rownames(res_normPanel)
+res_geneIDs_normPanel <- merge(as.data.frame(res_normPanel), metadata[,c('gene','ensembl','chr')], by = 'ensembl')
+
+
+```
+
+And take a quick look at the differentially expressed genes in a volcano plot
+```{r}
+EnhancedVolcano(res_geneIDs_normPanel,
+   lab = res_geneIDs_normPanel$gene,
+    x = 'log2FoldChange',
+    y = 'padj',
+    title = 'tumor vs normal',
+    subtitle = 'Increased expression in tumor is positive L2FC',
+    col = c('black', '#f2b97a', "#f2b97a", "#c8652c"),
+    colAlpha = .75,
+    FCcutoff = 2,
+    pCutoff = .05,
+    labSize = 3) +
+    ylim(0,7.5) 
+
+```
+
+We'll pause here and write the outputs.
+
+```{r}
+write.table(res_geneIDs_normPanel, '~/PhD/Oncocytoma/drafts/supData/deseqOutputs.txt',sep = '\t', quote = F, col.names = T, row.names = F)
+
+```
+
+
+Now do fgsea comparing tumors to normal panel
+```{r}
+
+# load in biomart to assign gene entrez IDs for gsea input
+hsmart <- useMart(dataset = "hsapiens_gene_ensembl", biomart = "ensembl")
+
+# assign ensembl gene IDs entrez gene IDs, and gene names based on our res_geneIDs_normPanel dataframe
+# this step can take a while!
+mapping_normPanel <- getBM(
+  attributes = c('ensembl_gene_id', 'entrezgene_id', 'hgnc_symbol'), 
+  filters = 'ensembl_gene_id',
+  values = res_geneIDs_normPanel$ensembl,
+  mart = hsmart
+)
+
+colnames(mapping_normPanel) <- c('ensembl','entrez','geneBioM')
+
+# and then combine it all into a new results dataframe
+res_geneIDs_normPanel_bioM <- merge(res_geneIDs_normPanel,mapping_normPanel, by = 'ensembl')
+res_geneIDs_normPanel_bioM <- res_geneIDs_normPanel_bioM[complete.cases(res_geneIDs_normPanel_bioM$entrez),]
+
+
+# then rank them to prepare for gsea
+res_geneIDs_normPanel_bioM <- res_geneIDs_normPanel_bioM[order(res_geneIDs_normPanel_bioM$log2FoldChange, decreasing = F),]
+
+# tidy the dataframe
+forGsea_normPanel <- unique(res_geneIDs_normPanel_bioM[,c('entrez','log2FoldChange')])
+forGsea_normPanel <- forGsea_normPanel[complete.cases(forGsea_normPanel),]
+
+# prepare gsea input
+ranks_normPanel <- forGsea_normPanel$log2FoldChange
+names(ranks_normPanel) <- forGsea_normPanel$entrez
+head(ranks_normPanel)
+
+
+```
+
+Great, now we've got our data ready, now let's load the hallmark gene sets.
+```{r}
+# load hallmark gmt file path
+gmt.file <- "~/PhD_data/references/h.all.v2023.1.Hs.entrez.gmt"
+
+# load and format pathways object
+pathways <- gmtPathways(gmt.file)
+str(head(pathways))
+
+```
+
+Now let's use that ranks list and the Hallmark gene set loaded earlier to do a fast GSEA.
+
+```{r}
+
+# run fgsea
+fgseaResHallmark <- fgsea(pathways, ranks_normPanel, minSize=15, maxSize=500)
+
+# save outputs
+fgseaResOrdered <- apply(fgseaResHallmark[order(fgseaResHallmark$NES, decreasing = T),], 2, as.character)
+write.table(as.data.frame(fgseaResOrdered),'~/PhD/Oncocytoma/drafts/supData/gseaHallmark.txt', sep = '\t', quote = T, row.names = F, col.names = T)
+
+# check outputs
+head(fgseaResHallmark)
+
+
+```
+
+
+Do we have any significant gene programs?  We're using a padj cutoff of < .05 and a net effect score threshold of > 1.5.
+```{r}
+
+sig_fgseaResHallmark <- fgseaResHallmark[fgseaResHallmark$padj < .05 & abs(fgseaResHallmark$NES) > 1.5,]
+
+```
+
+Make a pretty comparison chart using fgsea's built-in plot tool.
+```{r}
+
+plotGseaTable(pathways[sig_fgseaResHallmark[order(sig_fgseaResHallmark$NES, decreasing = T),]$pathway], ranks_normPanel, fgseaResHallmark, gseaParam = 0.5)
+
+```
+
+Share version details.
+```{r}
+
+version
+
+```

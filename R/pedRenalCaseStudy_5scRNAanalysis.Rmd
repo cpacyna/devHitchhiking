@@ -1,0 +1,553 @@
+---
+title: "Pediatric Renal Case Study - 5 scRNAseq analysis"
+author: "Chloe Pacyna"
+date: "08/11/2023"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Load in required packages.
+```{r}
+library(Matrix)
+library(Seurat)
+library(data.table)
+library(stringr)
+library(alleleIntegrator)
+library(GenomicFeatures)
+options(scipen = 999)
+```
+
+Load in Matthew Young's logistic regression script and make sure strings are set as factors.
+```{r}
+source('/lustre/scratch126/casm/team154pc/cp19/scripts/logisticRegression.R')
+options(stringsAsFactors = FALSE)
+
+```
+
+### Initial data processing and clustering
+Read in single cell data.
+```{r}
+# read in sc data
+foldernames <- list.dirs(path = '/lustre/scratch126/casm/team154pc/cp19/projects/oncocytoma/data/', full.names = TRUE, recursive = FALSE)
+foldernames_for10x_dec <- paste(foldernames,'/outs', sep = '')
+
+# read in both the pediatric samples and pre-annotated samples from a previously published adult oncocytoma patient for better clustering
+ready_foldernames <- c('/lustre/scratch126/casm/team154pc/cp19/projects/oncocytoma/data/5739STDY9266976/outs/filtered_gene_bc_matrices/GRCh38',
+                       '/lustre/scratch126/casm/team154pc/cp19/projects/oncocytoma/data/5739STDY9266977/outs/filtered_gene_bc_matrices/GRCh38',
+                       '/lustre/scratch126/casm/team154pc/cp19/projects/oncocytoma/data/5739STDY9266978/outs/filtered_gene_bc_matrices/GRCh38',
+                       '/lustre/scratch126/casm/team154pc/cp19/projects/oncocytoma/data/5739STDY9266979/outs/filtered_gene_bc_matrices/GRCh38',
+                       '/lustre/scratch126/casm/team154pc/cp19/projects/oncocytoma/data/5739STDY9266980/outs/filtered_gene_bc_matrices/GRCh38',
+                       '/lustre/scratch126/casm/team154pc/cp19/projects/oncocytoma/data/5739STDY9266981/outs/filtered_gene_bc_matrices/GRCh38',
+                       '/lustre/scratch126/casm/team154pc/cp19/projects/oncocytoma/data/5739STDY9266982/outs/filtered_gene_bc_matrices/GRCh38',
+                       '/lustre/scratch126/casm/team154pc/cp19/projects/oncocytoma/data/5739STDY9267000/outs/filtered_gene_bc_matrices/GRCh38',
+                       '/lustre/scratch126/casm/team154pc/cp19/projects/oncocytoma/data/5739STDY9267001/outs/filtered_gene_bc_matrices/GRCh38',
+                       '/lustre/scratch126/casm/team154pc/cp19/projects/oncocytoma/data/5739STDY9267002/outs/filtered_gene_bc_matrices/GRCh38',
+                       '/lustre/scratch126/casm/team154pc/cp19/projects/oncocytoma/data/5739STDY9267003/outs/filtered_gene_bc_matrices/GRCh38',
+                       '/lustre/scratch126/casm/team154pc/cp19/projects/oncocytoma/data/5739STDY9267004/outs/filtered_gene_bc_matrices/GRCh38',
+                       '/lustre/scratch126/casm/team154pc/cp19/projects/oncocytoma/data/5739STDY9267005/outs/filtered_gene_bc_matrices/GRCh38')
+
+dir <- head(ready_foldernames, 1)
+ready_foldernames1 <- ready_foldernames[- 1]
+# typical folder format, do this first
+for(dir in ready_foldernames1) {
+  sample <- sapply(strsplit(dir,"/"),`[`,10)
+  kidneydata <- Read10X(data.dir = dir, strip.suffix = TRUE, gene.column = 1)
+  kidney_seu <- CreateSeuratObject(kidneydata,
+                                   assay = 'RNA')
+  kidney_seu@active.ident <- as.factor(rep(sample,length(colnames(kidney_seu))))
+  kidney_seu <- RenameCells(kidney_seu, add.cell.id = sample)
+  seurobj <- merge(kidney_seu, seurobj, merge.data = TRUE, project = 'imprinting')
+}
+
+#name seurat obj
+onco <- seurobj
+```
+
+Set up gene names and mitochondrial gene dataframes
+```{r}
+# read in useful
+biomart_useful <- fread('/lustre/scratch119/casm/team274sb/cp19/references/genes_to_ensembl.txt', header = T)
+colnames(biomart_useful) <- c('Gene.stable.ID','Gene.version.ID','Tx.stable.ID','Gene.name','Tx.etc')
+
+# ID mitochondrial genes
+mitogenes <- grep('^MT-',biomart_useful$Gene.name,value = TRUE)
+biomart_mito <- biomart_useful[biomart_useful$Gene.name %in% mitogenes,]
+biomart_mito_sele <- biomart_mito[biomart_mito$Gene.stable.ID %in% rownames(onco),]$Gene.stable.ID
+
+```
+
+Investivate quality of cells.
+```{r}
+onco[["percent.mt"]] <- PercentageFeatureSet(onco, features = biomart_mito_sele, assay = 'RNA')
+VlnPlot(onco, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+```
+
+Because this tumor type is known to have large amounts of mitochondria , we're not going to filter out cells with abnormally high mitochondria gene counts.  We will still filter out cells with too few or too many genes expressed to decrease the number of empty or doublet droplets.
+```{r}
+onco <- subset(onco, subset = nFeature_RNA > 200 & nFeature_RNA < 30000)
+```
+
+
+We're going to check out the cycling cells, but not regress them out as tumor cells may be cycling at a higher rate.
+```{r}
+
+# normalize and scale data
+onco <- NormalizeData(onco)
+onco <- FindVariableFeatures(onco, selection.method = "vst")
+onco <- ScaleData(onco)
+
+# create S and G to M phase gene lists
+ensembl.s.genes <- as.character(biomart_useful[biomart_useful$Gene.name %in% cc.genes.updated.2019$s.genes,]$Gene.stable.ID)
+ensembl.g2m.genes <- as.character(biomart_useful[biomart_useful$Gene.name %in% cc.genes.updated.2019$s.genes,]$Gene.stable.ID)
+
+# add cell cycle score to seurat object
+onco <- CellCycleScoring(onco, s.features = ensembl.s.genes, g2m.features = ensembl.g2m.genes, set.ident = TRUE)
+
+```
+
+
+```{r}
+
+onco <- RunPCA(onco, features = VariableFeatures(onco), nfeatures.print = 10)
+
+```
+
+Inspect data dimensions to prepare for clustering.
+```{r}
+
+VizDimLoadings(onco, dims = 1:2, reduction = "pca")
+
+DimPlot(onco, reduction = "pca")
+DimHeatmap(onco, dims = 1, cells = 500, balanced = TRUE)
+ElbowPlot(onco)
+
+```
+
+Find neighbors and cluster.
+```{r}
+
+# name cells so we can keep track of them
+onco@active.ident <- as.factor(sapply(strsplit(colnames(onco),'\\_'),`[`,1))
+
+# cluster 
+onco <- FindNeighbors(onco, dims = 1:30)
+onco <- FindClusters(onco, resolution = 2.1)
+head(Idents(onco), 5)
+
+```
+
+Generate UMAP and check results.
+```{r}
+
+onco <- RunUMAP(onco, dims = 0:50)
+
+
+DimPlot(onco, group.by = "old.ident", label = T)
+
+```
+
+
+### Cell type annotation with logistic regression
+We need to annotate these clusters, so let's use logistic regression to compare these cells to the normal renal scRNAseq dataset in the 2022 Cancer Cell paper by Ruoyan Li, et al. 
+We'll use the logistic regression method as described in the 2018 Science paper by Matthew Young, et al.  
+
+First, let's load in the Li R., et al. data as a sparse matrix and prepare the metadata.
+
+```{r}
+sparse_kidney_reference <- readMM('/lustre/scratch119/casm/team274sb/cp19/sc_data/all_kidney_tom/scRNA/matrix.mtx')
+cellnames_reference <- read.table('/lustre/scratch119/casm/team274sb/cp19/sc_data/all_kidney_tom/scRNA/allCounts_colnames.txt')
+genenames_reference <- read.table('/lustre/scratch119/casm/team274sb/cp19/sc_data/all_kidney_tom/scRNA/allCounts_rownames.txt'); colnames(genenames_reference) <- 'Gene.name'
+
+# make gene names into ensembl
+genenames_reference_biomart <- merge(genenames_reference, biomart_useful, by = 'Gene.name')
+
+colnames(sparse_kidney_reference) <- cellnames_reference$V1
+rownames(sparse_kidney_reference) <- genenames_reference$Gene.name
+
+all_kidney_metadata <- fread('/lustre/scratch119/casm/team274sb/cp19/sc_data/all_kidney_tom/scRNA/allCounts_annotation_copy.txt')
+rownames(all_kidney_metadata) <- all_kidney_metadata$cellID
+classes <- all_kidney_metadata$annotation
+
+
+```
+
+Now that we have all the inputs prepared, let's train our logistic regression model.  This might take a bit of time!
+```{r}
+
+# TRAIN DATASET
+fitted_data <- trainModel(refMat = sparse_kidney_reference, classes = classes, maxCells=120,minCells=100, nParallel = 1)
+
+```
+
+And then we'll select cells from our patient (omitting the adult samples).  
+
+```{r}
+
+# get seurat object for only hybrid patient
+hybrid_only_samples <- c('5739STDY9267000','5739STDY9267001','5739STDY9267002','5739STDY9267003','5739STDY9267004','5739STDY9267005')
+adult_only_samples <- c('5739STDY9266976', '5739STDY9266977','5739STDY9266978','5739STDY926699','5739STDY9266980','5739STDY9266981','5739STDY9266982')
+hybrid_only <- subset(onco, old.ident %in% hybrid_only_samples)
+
+
+hybrid_counts <- hybrid_only@assays$RNA@counts
+genes_hybrid <- as.data.frame(rownames(hybrid_counts)); colnames(genes_hybrid) <- 'Gene.stable.ID'
+biomart_useful_only <- biomart_useful[,c('Gene.stable.ID','Gene.name')]
+genes_hybrid_names <- unique(merge(genes_hybrid, biomart_useful_only, by = 'Gene.stable.ID'))
+
+# select useful genes (sad that we'll be throwing out some but oh well)
+hybrid_counts <- hybrid_counts[genes_hybrid_names$Gene.stable.ID,]
+rownames(hybrid_counts) <- genes_hybrid_names$Gene.name
+
+```
+
+And feed that into our model to predict cell type similarity.
+```{r}
+
+# COMPARE TO TEST DATASET
+predicted_onco <- predictSimilarity(fitted_data, hybrid_counts, classes = hybrid_only$seurat_clusters, minGeneMatch = .7)
+
+```
+
+Generate a heatmap to visualize the results
+```{r}
+
+similarityHeatmap(predicted_onco, cluster_rows = T)
+
+```
+
+I manually assigned cell types by cluster based on those predicted results, which I'm reading in here so we can visualize it all on a UMAP.
+```{r}
+
+# read in annotation approximations from logistic regression
+annotation_oncoLR <- fread('~/cp19/projects/oncocytoma/annotation_from_LR_onco.txt')
+
+# there are three categories of cell type IDs: fine, medium, and coarse.  for example: 'cDC1' is fine, 'Dendritic-cell' is medium, and 'Immune' is coarse
+colnames(annotation_oncoLR) <- c('seurat_clusters', 'Cell.type_fine','Cell.type_medium','Cell.type_coarse', 'Notes')
+
+# merge with onco seurat object
+anno_merge <- merge(onco@meta.data,annotation_oncoLR, by = 'seurat_clusters')
+rownames(anno_merge) <- anno_merge$cellID
+anno_merge_sort <- anno_merge[colnames(onco),]
+
+
+# go into fine detail for kidney cells but stick to medium/coarse annotations for non-renal cells
+anno_merge_sort$forPublication <- ifelse(anno_merge_sort$Cell.type_coarse == 'Immune', anno_merge_sort$Cell.type_medium,
+                                         ifelse(anno_merge_sort$Cell.type_coarse == 'Epithelial', anno_merge_sort$Cell.type_fine,
+                                                ifelse(anno_merge_sort$Cell.type_coarse == 'Endothelial', 'Endothelial',
+                                                       ifelse(anno_merge_sort$Cell.type_coarse == 'Fibroblast', 'Fibroblast',
+                                                              ifelse(anno_merge_sort$Cell.type_coarse == 'unclear', 'unclear','Unknown')))))
+
+onco <- AddMetaData(onco, anno_merge_sort[,c('Cell.type_fine','Cell.type_medium','Cell.type_coarse','forPublication')])
+
+# generate UMAP
+DimPlot(onco, group.by = 'forPublication', label = T, pt.size = .5,
+        cols = c('Collecting-Duct_TypeA-cell'='#F371AE', 'Collecting-Duct_TypeB-cell' = '#c3005c', 'Distal-principal_cell' = '#980147',
+                 'Loop-of-Henle' = '#82013d', 'Podocyte' = '#6d0133', 'Proximal_tubule' = '#580029', 'Tip-cell' = '#41001f', 
+                 'B-cell' = '#8dcac2', 'Dendritic-cell' = '#71c2b4', 'Macrophage-DendriticCell' ='#50b59d', 'Macrophage' = '#02a177', 
+                 'Monocyte' = '#00805a', 'NK' = '#02634d', 'T-cell' = '#004934',
+                 'Endothelial' ='#424d88','Fibroblast' = '#f0b40b',
+                 'Plasma' = '#727c9b', 
+                 'Low-quality_Immune' = '#bed5d3', 'unclear' = '#b4b4b4', 'Unknown_Epi' = '#4e5c68'))
+
+```
+
+### Tumor cell identification with alleleIntegrator
+Now we need to identify which of these are our tumor clusters.  We'd expect them to be transcriptomically similar to the collecting duct intercalating type A cells based on our understanding of oncocytomas and chromophobe RCCs.  Let's see if that ends up being the case by using tumor-specific loss of heterozygosity (LOH).
+
+Oncocytomas A and D have unique LOH (tumors C and E only have whole chromosome gains), so we'll phase exonic SNPs from one of the patient's whole genome sequencing dataset and look for cells within the scRNAseq datset that express only one allele of chromosome 1 (tumor A) or chromosome 6 (tumor C).
+
+First, let's set general parameters.
+```{r}
+
+outDir = '~/cp19/projects/oncocytoma/results/'
+refGenome = 'Data/DNA/genomeDNA.fa'
+refGenome = '/lustre/scratch117/core/sciops_repository/references/Homo_sapiens/1000Genomes_hs37d5/all/fasta/hs37d5.fa'
+refGenome10X = '/nfs/srpipe_references/downloaded_from_10X/refdata-cellranger-GRCh38-3.0.0/fasta/genome.fa'
+liftChain = '/lustre/scratch119/casm/team274sb/cp19/references/hg19ToHg38_noChr.over.chain'
+gtf = '/nfs/srpipe_references/downloaded_from_10X/refdata-cellranger-GRCh38-3.0.0/genes/genes.gtf'
+txdb = makeTxDbFromGFF(gtf)
+gns = genes(txdb)
+nParallel=156
+
+```
+
+And get started with tumor A, which has lost chromosome 1.  We'll set some sample-specific parameters here.
+```{r}
+# set path for tumor A's WGS bam file
+tumourDNA = '/lustre/scratch119/casm/team274sb/cp19/sc_data/all_kidney_tom/DNA/PD48545a.sample.dupmarked.bam'
+# and path for the normal blood sample 
+patientDNA = '/lustre/scratch119/casm/team274sb/cp19/sc_data/all_kidney_tom/DNA/PD48545f.sample.dupmarked.bam'
+# and paths for all pediatric scRNAseq bam files (we expect most/all tumor A cells to come from the tumor A bam file, but we'll run this on all to be sure we're catching all the likely A cells)
+bams10X = paste0(file.path('/lustre/scratch116/casm/cgp/users/tjm/mainCSF/scRNA/fileTransfer/bams',c('5739STDY9267000','5739STDY9267001','5739STDY9267002','5739STDY9267003','5739STDY9267004','5739STDY9267005')),'.bam')
+bams10X = setNames(file.path(bams10X),sub('.bam','',basename(bams10X)))
+
+```
+
+Set up copy number segments for chromosome 1
+```{r}
+
+altChrs = c(1)
+segs = GRanges(altChrs,IRanges(rep(1,length(altChrs)),1e9))
+segs$matNum = c(1)
+segs$patNum = c(0)
+segs$tumFrac = segs$matNum/(segs$patNum+segs$matNum)
+segs$normFrac = 0.5
+names(segs) = altChrs
+
+```
+
+Let's identify heterozygous SNPs from the blood sample!
+```{r}
+hSNPs = findHetSNPs(patientDNA,refGenome,file.path(outDir,'pediatricOncocytoma_patient_hetSNPs.vcf'),nParallel=nParallel, skipIfExists=T)
+message(sprintf("Found %d heterozygous SNPs",length(hSNPs)))
+```
+
+And now we'll phase those SNPs in the tumor sample
+```{r}
+phSNPs = phaseSNPsFromCN(hSNPs,segs,refGenome,tumourDNA,outPath=file.path(outDir,'pediatricOncocytoma_tumour_countAtHetSNPs.tsv'),nParallel=nParallel, alleleCounterParams = list(bin = '/nfs/users/nfs_m/my4/bin/alleleCounter', f=3,F=3852,m=20,q=35, skipIfExists = T))
+
+message(sprintf("Of %d heterozygous SNPs:",length(hSNPs)))
+message(sprintf("  %d (%.01f%%) could be phased, of which:",sum(phSNPs$informative),sum(phSNPs$informative)/length(phSNPs)*100))
+message(sprintf("    %d (%.01f%%) failed sanity checks",sum(!phSNPs$passSanity,na.rm=TRUE),sum(!phSNPs$passSanity,na.rm=TRUE)/sum(phSNPs$informative)*100))
+message(sprintf("    %d (%.01f%%) the maternal allele is ALT",sum(phSNPs$altIsMum,na.rm=TRUE),sum(phSNPs$altIsMum,na.rm=TRUE)/sum(phSNPs$informative)*100))
+
+```
+
+Because the WGS data are aligned to hg19 and the scRNAseq data are aligned to hg38, we need to liftover the coordinates before we look for these SNPs in the scRNAseq data.
+```{r}
+
+#Liftover to GRCh38
+phSNPs38 = changeGenomeVersion(phSNPs,liftChain)
+#And drop non-phased or QC failed
+phSNPs38 = phSNPs38[phSNPs38$informative & phSNPs38$passSanity]
+#Annotate SNPs using GTF
+phSNPs38 = annotateSNPs(phSNPs38,gtf)
+
+```
+
+
+Now let's integrate with the scRNAseq data!
+```{r}
+phCnts = getAllelicExpression(phSNPs38,refGenome10X,bams10X,assayType = '10X', skipIfExists = T, outputs=file.path(outDir,paste0('PD48545_',names(bams10X),'_scRNA_alleleCounts_A.tsv')),nParallel=nParallel, bin = '/nfs/users/nfs_m/my4/bin/alleleCounter')
+```
+
+And then do some post-processing and filtering before we determine which cells match tumor A's LOH profile.
+```{r}
+
+# get cell IDs and prepare outputs for analysis
+passCellIDs = paste(colnames(onco),'-1',sep='')
+gCnts = phCnts[phCnts$regionType %in% c('Intronic','Exonic') &  #Select types of regions to keep
+                 phCnts$cellID %in% passCellIDs & #Only keep cells
+                 phCnts$informative & #SNPs should be informative
+                 phCnts$passSanity & #And consistent
+                 phCnts$matCount+phCnts$patCount>0  #And have some information
+               ]
+tmp = buildCountMatricies(gCnts)
+tmp = rowSums(tmp$matCount + tmp$patCount)
+gCnts$countsInNormCells = tmp[gCnts$regionID]
+gCnts$countsInNormCells[is.na(gCnts$countsInNormCells)] = 0
+
+# drop any without enough power
+gCnt = gCnts[gCnts$countsInNormCells > 10]
+
+# now get the number of informative SNPs for each cell
+dd =data.frame(nInf = sapply(split(gCnts$matCount+gCnts$patCount>0,gCnts$cellID),sum,na.rm=TRUE),
+               nCntMat = sapply(split(gCnts$matCount,gCnts$cellID),sum,na.rm=TRUE),
+               nCntPat = sapply(split(gCnts$patCount,gCnts$cellID),sum,na.rm=TRUE),
+               nCnt = sapply(split(gCnts$matCount+gCnts$patCount,gCnts$cellID),sum,na.rm=TRUE)
+)
+dd$cellID = rownames(dd)
+
+# check quality of SNPs
+message("Quantiles of informative SNPs per cell genome wide:")
+print(quantile(dd$nInf))
+
+# make dataframe of outputs
+gCnts$mark = paste0(gCnts$cellID,'____',seqnames(gCnts))
+dd2 =data.frame(nInf = sapply(split(gCnts$matCount+gCnts$patCount>0,gCnts$mark),sum,na.rm=TRUE),
+                nCntMat = sapply(split(gCnts$matCount,gCnts$mark),sum,na.rm=TRUE),
+                nCntPat = sapply(split(gCnts$patCount,gCnts$mark),sum,na.rm=TRUE),
+                nCnt = sapply(split(gCnts$matCount+gCnts$patCount,gCnts$mark),sum,na.rm=TRUE)
+)
+
+dd2$cellID = gsub('___.*','',rownames(dd2))
+dd2$chromosome = gsub('.*___','',rownames(dd2))
+
+# make high level summary
+t(sapply(split(dd2$nInf,dd2$chromosome),quantile))
+
+# make boxplot
+dd2$chromosome = factor(dd2$chromosome,levels=unique(dd2$chromosome)[order(as.numeric(unique(dd2$chromosome)))])
+boxplot(split(dd2$nInf,dd2$chromosome),las=2,log='y')
+abline(h=5,col='red')
+
+```
+
+Test for which cells have a significant difference between allele 1 and allele 2, and then plot the outputs.
+```{r}
+
+# check FDR for allele 1 and allele 2 (labelled here "mat" and "pat", though we don't know which are which as we don't have trio data...so "mat" is allele 1 and "pat" is allele 2)
+pVal = pmin(pbinom(dd2$nCntMat,dd2$nCntMat+dd2$nCntPat,0.5),pbinom(dd2$nCntPat,dd2$nCntMat+dd2$nCntPat,0.5))
+dd2$FDR = p.adjust(pVal,method='BH')
+
+# cutoffs for cells with a CN loss
+dd2_loss <- dd2[dd2$nCnt > 10 & dd2$FDR < .05 & dd2$nCntPat == 0,]
+
+
+# plot it!
+DimPlot(
+  object = onco, 
+  cells.highlight = substr(dd2_loss$cellID,1,nchar(dd2_loss$cellID)-2),
+) + 
+  scale_color_manual(labels = c("WT", "Potential A"), values = c("grey", "#d9125b")) +
+  labs(color = "Cell Type")
+
+```
+
+Now we'll do the same thing for tumor D, which lost chromosome 6.
+
+Set sample-specific params.
+```{r}
+
+tumourDNA_d = '/lustre/scratch119/casm/team274sb/cp19/sc_data/all_kidney_tom/DNA/PD48545d.sample.dupmarked.bam'
+patientDNA = '/lustre/scratch119/casm/team274sb/cp19/sc_data/all_kidney_tom/DNA/PD48545f.sample.dupmarked.bam'
+bams10X = paste0(file.path('/lustre/scratch116/casm/cgp/users/tjm/mainCSF/scRNA/fileTransfer/bams',c('5739STDY9267000','5739STDY9267001','5739STDY9267002','5739STDY9267003','5739STDY9267004','5739STDY9267005')),'.bam')
+bams10X = setNames(file.path(bams10X),sub('.bam','',basename(bams10X)))
+
+```
+
+Set up copy number segments for chromosome 6.
+```{r}
+altChrsD = c(6)
+segsD = GRanges(altChrsD,IRanges(rep(1,length(altChrsD)),1e9))
+segsD$matNum = c(1)
+segsD$patNum = c(0)
+segsD$tumFrac = segsD$matNum/(segsD$patNum+segsD$matNum)
+segsD$normFrac = 0.5
+names(segsD) = altChrsD
+```
+
+Because we're still working with the same patient, we don't need to rerun the initial SNP calling step to generate the hSNPs object.
+
+We'll pick back up where we phase SNPs in the tumor DNA sample.
+```{r}
+phSNPs_D = phaseSNPsFromCN(hSNPs,segsD,refGenome,tumourDNA_d,outPath=file.path(outDir,'pediatricOncocytoma_tumour_countAtHetSNPs_D.tsv'),nParallel=nParallel, alleleCounterParams = list(bin = '/nfs/users/nfs_m/my4/bin/alleleCounter', f=3,F=3852,m=20,q=35, skipIfExists = T))
+message(sprintf("Of %d heterozygous SNPs:",length(hSNPs)))
+message(sprintf("  %d (%.01f%%) could be phased, of which:",sum(phSNPs_D$informative),sum(phSNPs_D$informative)/length(phSNPs_D)*100))
+message(sprintf("    %d (%.01f%%) failed sanity checks",sum(!phSNPs_D$passSanity,na.rm=TRUE),sum(!phSNPs_D$passSanity,na.rm=TRUE)/sum(phSNPs_D$informative)*100))
+message(sprintf("    %d (%.01f%%) the maternal allele is ALT",sum(phSNPs_D$altIsMum,na.rm=TRUE),sum(phSNPs_D$altIsMum,na.rm=TRUE)/sum(phSNPs_D$informative)*100))
+
+```
+
+And again do our liftover step from hg19 to hg38.
+```{r}
+# liftover to GRCh38
+phSNPs38_D = changeGenomeVersion(phSNPs_D,liftChain)
+# and drop non-phased or QC failed
+phSNPs38_D = phSNPs38_D[phSNPs38_D$informative & phSNPs38_D$passSanity]
+# annotate SNPs using GTF
+phSNPs38_D = annotateSNPs(phSNPs38_D,gtf)
+
+```
+
+Next we'll integrate with the scRNAseq data.
+
+```{r}
+
+phCnts_D = getAllelicExpression(phSNPs38_D,refGenome10X,bams10X,assayType = '10X', skipIfExists = T, outputs=file.path(outDir,paste0('PD48545',names(bams10X),'_scRNA_alleleCounts_D.tsv')),nParallel=nParallel, bin = '/nfs/users/nfs_m/my4/bin/alleleCounter')
+
+```
+
+And then we'll filter and process the data just like last time.
+
+```{r}
+
+# get cell IDs and prepare outputs for analysis
+passCellIDs = paste(colnames(onco),'-1',sep='')
+gCnts_D = phCnts_D[phCnts_D$regionType %in% c('Intronic','Exonic') &  #Select types of regions to keep
+                     phCnts_D$cellID %in% passCellIDs & #Only keep cells
+                     phCnts_D$informative & #SNPs should be informative
+                     phCnts_D$passSanity & #And consistent
+                     phCnts_D$matCount+phCnts_D$patCount>0  #And have some information
+                   ]
+
+tmpD = buildCountMatricies(gCnts_D)
+tmpD = rowSums(tmpD$matCount + tmpD$patCount)
+gCnts_D$countsInNormCells = tmpD[gCnts_D$regionID]
+gCnts_D$countsInNormCells[is.na(gCnts_D$countsInNormCells)] = 0
+
+# drop any without enough power
+gCnts_D = gCnts_D[gCnts_D$countsInNormCells > 10]
+
+# now get the number of informative SNPs for each cell
+ddD =data.frame(nInf = sapply(split(gCnts_D$matCount+gCnts_D$patCount>0,gCnts_D$cellID),sum,na.rm=TRUE),
+                nCntMat = sapply(split(gCnts_D$matCount,gCnts_D$cellID),sum,na.rm=TRUE),
+                nCntPat = sapply(split(gCnts_D$patCount,gCnts_D$cellID),sum,na.rm=TRUE),
+                nCnt = sapply(split(gCnts_D$matCount+gCnts_D$patCount,gCnts_D$cellID),sum,na.rm=TRUE)
+)
+ddD$cellID = rownames(ddD)
+
+# check quality of SNPs
+message("Quantiles of informative SNPs per cell genome wide:")
+print(quantile(ddD$nInf))
+
+# make dataframe of outputs
+gCnts_D$mark = paste0(gCnts_D$cellID,'____',seqnames(gCnts_D))
+dd2D =data.frame(nInf = sapply(split(gCnts_D$matCount+gCnts_D$patCount>0,gCnts_D$mark),sum,na.rm=TRUE),
+                 nCntMat = sapply(split(gCnts_D$matCount,gCnts_D$mark),sum,na.rm=TRUE),
+                 nCntPat = sapply(split(gCnts_D$patCount,gCnts_D$mark),sum,na.rm=TRUE),
+                 nCnt = sapply(split(gCnts_D$matCount+gCnts_D$patCount,gCnts_D$mark),sum,na.rm=TRUE)
+)
+
+dd2D$cellID = gsub('___.*','',rownames(dd2D))
+dd2D$chromosome = gsub('.*___','',rownames(dd2D))
+
+# make high level summary
+t(sapply(split(dd2D$nInf,dd2D$chromosome),quantile))
+
+# make boxplot
+dd2D$chromosome = factor(dd2D$chromosome,levels=unique(dd2D$chromosome)[order(as.numeric(unique(dd2D$chromosome)))])
+boxplot(split(dd2D$nInf,dd2D$chromosome),las=2,log='y')
+abline(h=5,col='red')
+
+```
+
+And do our filtering to finalize the cells with loss of chr 6 and generate a UMAP.
+
+```{r}
+
+# check FDR for allele 1 and allele 2
+pValD = pmin(pbinom(dd2D$nCntMat,dd2D$nCntMat+dd2D$nCntPat,0.5),pbinom(dd2D$nCntPat,dd2D$nCntMat+dd2D$nCntPat,0.5))
+dd2D$FDR = p.adjust(pValD,method='BH')
+
+# cutoffs for cells with a CN loss
+dd2D_loss <- dd2D[dd2D$nCnt > 10 & dd2D$FDR < .05 & dd2D$nCntPat == 0,]
+
+# plot it!
+DimPlot(
+  object = onco, 
+  cells.highlight = substr(dd2D_loss$cellID,1,nchar(dd2D_loss$cellID)-2),
+) + 
+  scale_color_manual(labels = c("WT", "Potential D"), values = c("grey", "#20aa39")) +
+  labs(color = "Cell Type")
+
+```
+
+Combine the two to make UMAP for extended data figure 1c.
+```{r}
+
+
+
+```
+
+
+```{r}
+version
+```
+
+
+
+

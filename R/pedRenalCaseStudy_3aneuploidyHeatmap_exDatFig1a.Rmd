@@ -1,0 +1,245 @@
+---
+title: "S1A Copy Number Change Heatmap"
+author: "Chloe Pacyna"
+date: "19/09/2023"
+output:
+  html_document: default
+  pdf_document: default
+  word_document: default
+---
+
+
+
+The goal of this script is to generate a heatmap of copy number changes in the four tumors.  I'm gently adapting the approach introduced by [Zuguang Gu](https://github.com/jokergoo) in his incredible [ComplexHeatmap guide](https://jokergoo.github.io/ComplexHeatmap-reference/book/genome-level-heatmap.html) on genome level heatmaps.  I'm borrowing the GRanges chromosome binning and sorting near-verbatum, and I adapt a few details to be ASCAT friendly.
+
+First, let's load the required packages.
+
+```{r, echo=FALSE}
+library(circlize)
+library(GenomicRanges)
+library(EnrichedHeatmap)
+library(ComplexHeatmap)
+library(data.table)
+```
+
+We also set up the working directory for the whole markdown at the beginning:
+```{r setup}
+    knitr::opts_knit$set(root.dir = normalizePath("~/PhD/Oncocytoma/drafts/scripts/data/")) 
+```
+
+
+Next, let's read in our chromosome info,.  This is lifted directly from the guide.
+```{r}
+
+chr_df = read.chromInfo(species='hg19')$df
+chr_df = chr_df[chr_df$chr %in% c(paste0("chr", 1:22),'chrX'), ]
+chr_gr = GRanges(seqnames = chr_df[, 1], ranges = IRanges(chr_df[, 2] + 1, chr_df[, 3]))
+chr_gr
+
+```
+
+Now we can make chromosome windows 1Mb in length.  This means we'll have 1e6 resolution in displaying chromosome breaks in our eventual end product heatmap.
+```{r}
+
+chr_window = makeWindows(chr_gr, w = 1e6)
+chr_window
+```
+
+Let's read in the average_in_window function() from [ComplexHeatmaps](https://jokergoo.github.io/ComplexHeatmap-reference/book/genome-level-heatmap.html) (which was adapted from the [HilbertCurve package](https://bioconductor.org/packages/release/bioc/html/HilbertCurve.html)).
+```{r, echo = F}
+average_in_window = function(window, gr, v, method = "weighted", empty_v = NA) {
+
+    if(missing(v)) v = rep(1, length(gr))
+    if(is.null(v)) v = rep(1, length(gr))
+    if(is.atomic(v) && is.vector(v)) v = cbind(v)
+
+    v = as.matrix(v)
+    if(is.character(v) && ncol(v) > 1) {
+        stop("`v` can only be a character vector.")
+    }
+
+    if(length(empty_v) == 1) {
+        empty_v = rep(empty_v, ncol(v))
+    }
+
+    u = matrix(rep(empty_v, each = length(window)), nrow = length(window), ncol = ncol(v))
+
+    mtch = as.matrix(findOverlaps(window, gr))
+    intersect = pintersect(window[mtch[,1]], gr[mtch[,2]])
+    w = width(intersect)
+    v = v[mtch[,2], , drop = FALSE]
+    n = nrow(v)
+
+    ind_list = split(seq_len(n), mtch[, 1])
+    window_index = as.numeric(names(ind_list))
+    window_w = width(window)
+
+    if(is.character(v)) {
+        for(i in seq_along(ind_list)) {
+            ind = ind_list[[i]]
+            if(is.function(method)) {
+                u[window_index[i], ] = method(v[ind], w[ind], window_w[i])
+            } else {
+                tb = tapply(w[ind], v[ind], sum)
+                u[window_index[i], ] = names(tb[which.max(tb)])
+            }
+        }
+    } else {
+        if(method == "w0") {
+            gr2 = reduce(gr, min.gapwidth = 0)
+            mtch2 = as.matrix(findOverlaps(window, gr2))
+            intersect2 = pintersect(window[mtch2[, 1]], gr2[mtch2[, 2]])
+
+            width_intersect = tapply(width(intersect2), mtch2[, 1], sum)
+            ind = unique(mtch2[, 1])
+            width_setdiff = width(window[ind]) - width_intersect
+
+            w2 = width(window[ind])
+
+            for(i in seq_along(ind_list)) {
+                ind = ind_list[[i]]
+                x = colSums(v[ind, , drop = FALSE]*w[ind])/sum(w[ind])
+                u[window_index[i], ] = (x*width_intersect[i] + empty_v*width_setdiff[i])/w2[i]
+            }
+
+        } else if(method == "absolute") {
+            for(i in seq_along(ind_list)) {
+                u[window_index[i], ] = colMeans(v[ind_list[[i]], , drop = FALSE])
+            }
+            
+        } else if(method == "weighted") {
+            for(i in seq_along(ind_list)) {
+                ind = ind_list[[i]]
+                u[window_index[i], ] = colSums(v[ind, , drop = FALSE]*w[ind])/sum(w[ind])
+            }
+        } else {
+            if(is.function(method)) {
+                for(i in seq_along(ind_list)) {
+                    ind = ind_list[[i]]
+                    u[window_index[i], ] = method(v[ind], w[ind], window_w[i])
+                }
+            } else {
+                stop("wrong method.")
+            }
+        }
+    }
+
+    return(u)
+}
+```
+
+
+Now we need to read in the four tumour ascat results.  These *are* included in the github directory, in the data/ascat folder.  
+```{r}
+
+
+ascatA <- fread('ascat/PD48545a.ascat_ngs.summary.csv', select = c(2:8)); colnames(ascatA) <- c('Chr','start','stop','normTotal','normB','tumTotal','tumB'); ascatA$sample <- 'A'; ascatA$Chr <- paste0('chr',ascatA$Chr)
+
+ascatC <- fread('ascat/PD48545c.ascat_ngs.summary.csv', select = c(2:8)); colnames(ascatC) <- c('Chr','start','stop','normTotal','normB','tumTotal','tumB'); ascatC$sample <- 'C'; ascatC$Chr <- paste0('chr',ascatC$Chr)
+
+ascatD <- fread('ascat/PD48545d.ascat_ngs.summary.csv', select = c(2:8)); colnames(ascatD) <- c('Chr','start','stop','normTotal','normB','tumTotal','tumB'); ascatD$sample <- 'D'; ascatD$Chr <- paste0('chr',ascatD$Chr)
+
+ascatE <- fread('ascat/PD48545e.ascat_ngs.summary.csv', select = c(2:8)); colnames(ascatE) <- c('Chr','start','stop','normTotal','normB','tumTotal','tumB'); ascatE$sample <- 'E'; ascatE$Chr <- paste0('chr',ascatE$Chr)
+
+```
+
+Now split each of the files' ASCAT outputs for the total CN into our smaller 1Mb deliminated Grange.  For reference, copy number neutral is 2 for two alleles, 
+```{r}
+
+# for tumor A
+ascatAslim <- ascatA[,c('Chr','start','stop','tumTotal')] # select only the four necessary columns
+ascatAslim$start <- as.integer(ascatAslim$start); ascatAslim$stop <- as.integer(ascatAslim$stop); ascatAslim$tumTotal <- as.integer(ascatAslim$tumTotal) # make sure everything is an integer
+grA = with(ascatAslim, GRanges(Chr, IRanges(start=start, end=stop))) # build our genomic ranges object
+
+num_matA = average_in_window(chr_window, grA, ascatAslim[, -(1:3)])
+dim(num_matA)
+
+# for tumor C
+ascatCslim <- ascatC[,c('Chr','start','stop','tumTotal')]
+ascatCslim$start <- as.integer(ascatCslim$start); ascatCslim$stop <- as.integer(ascatCslim$stop); ascatCslim$tumTotal <- as.integer(ascatCslim$tumTotal)
+grC = with(ascatCslim, GRanges(Chr, IRanges(start=start, end=stop)))
+
+num_matC = average_in_window(chr_window, grC, ascatCslim[, -(1:3)])
+dim(num_matC)
+
+# for tumor D
+ascatDslim <- ascatD[,c('Chr','start','stop','tumTotal')]
+ascatDslim$start <- as.integer(ascatDslim$start); ascatDslim$stop <- as.integer(ascatDslim$stop); ascatDslim$tumTotal <- as.integer(ascatDslim$tumTotal)
+grD = with(ascatDslim, GRanges(Chr, IRanges(start=start, end=stop)))
+
+num_matD = average_in_window(chr_window, grD, ascatDslim[, -(1:3)])
+dim(num_matD)
+
+# for tumor E
+ascatEslim <- ascatE[,c('Chr','start','stop','tumTotal')]
+ascatEslim$start <- as.integer(ascatEslim$start); ascatEslim$stop <- as.integer(ascatEslim$stop); ascatEslim$tumTotal <- as.integer(ascatEslim$tumTotal)
+grE = with(ascatEslim, GRanges(Chr, IRanges(start=start, end=stop)))
+
+num_matE = average_in_window(chr_window, grE, ascatEslim[, -(1:3)])
+dim(num_matE)
+
+```
+
+Concatenate all into one large matrix.
+```{r}
+# concat them all together
+num_matAll <- cbind(num_matA,num_matC,num_matD,num_matE); colnames(num_matAll) <- c('A','C','D','E')
+dim(num_matAll)
+```
+
+Prepare decorations/labels for the plot.
+```{r}
+# chromosome labels
+chr = as.vector(seqnames(chr_window))
+chr_level = c(paste0("chr", 1:22),'chrX')
+chr = factor(chr, levels = chr_level)
+
+# subgroup tumor labels to subset the heatmap into four separate bars
+subgroup = rep(c("A", "C","D","E"), each = 1)
+
+```
+
+
+Make the heatmap!
+```{r}
+t_ht_list = Heatmap(t(num_matAll), name = "mat", col = colorRamp2(c(1, 2, 3, 4), c("#102e93", "white", "#b12124","#3d001c")), # make colors, transpose so it's horizontal
+    column_split = chr,  # split the columns by chromosome
+    cluster_columns = FALSE, show_row_dend = FALSE, # no clustering needed
+    row_split = subgroup, cluster_row_slices = FALSE, # split rows by subgroup but don't cluster
+    row_title = "tumours", # title the rows
+    #rect_gp = gpar(col = "white", lwd = 0), # make background
+    left_annotation = rowAnnotation(subgroup = subgroup, show_annotation_name = FALSE, col = list(subgroup = c("A" = "#6d3654ff", "C" = "#325676ff", "D" = "#9f6f88ff", "E" = "#6f889fff")),
+        annotation_legend_param = list(
+            subgroup = list(direction = "horizontal", title_position = "lefttop", nrow = 1))),
+    #column_title_rot = 45,
+    column_title_gp = gpar(fontsize = 10), border = TRUE,
+    column_gap = unit(0, "points"),
+    column_title = ifelse(1:23 %% 2 == 0, paste0("\n", chr_level), paste0(chr_level, "\n")),
+    heatmap_legend_param = list(direction = "horizontal", title_position = "lefttop"))
+
+```
+
+Draw for rmarkdown.
+```{r}
+draw(t_ht_list, heatmap_legend_side = "bottom", merge_legend = TRUE)
+
+```
+
+Save to file.
+```{r}
+# make pdf
+#pdf('~/PhD/Oncocytoma/drafts/supFigs/cnHeatmap.pdf', height = 2, width = 8,  colormodel = 'srgb')
+#draw(t_ht_list, heatmap_legend_side = "bottom", merge_legend = TRUE)
+#dev.off()
+
+# make svg
+#svg('~/PhD/Oncocytoma/drafts/supFigs/cnHeatmap.svg', colormodel = 'srgb')
+#draw(t_ht_list, heatmap_legend_side = "bottom", merge_legend = TRUE)
+#dev.off()
+
+# make png (may need to use "rasterize" option in making the heatmap)
+#png('~/PhD/Oncocytoma/drafts/supFigs/cnHeatmap.png',width=9,height=2,units="in",res=1200)
+#draw(t_ht_list, heatmap_legend_side = "bottom", merge_legend = TRUE)
+#dev.off()
+
+```

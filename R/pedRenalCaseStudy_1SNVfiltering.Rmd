@@ -1,0 +1,441 @@
+---
+title: "Pediatric Renal Case Study - SNV Filtering"
+author: "Chloe Pacyna"
+date: "19/09/2023"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Let's read in some packages
+```{r}
+require(data.table)
+library(devtools)
+library(dndscv)
+require("GenomicRanges")
+library("deepSNV")
+library("Rsamtools")
+
+```
+
+
+Next, let's load in unmatched data and filter
+```{r}
+
+pass_muts <- read.table('~/PhD/Oncocytoma/data/all_muts.bed')
+pass_muts$mutCode <- paste(pass_muts$V1,pass_muts$V2,pass_muts$V3,pass_muts$V4,sep="_")
+
+# read in new cgpVAF outputs, filter for ones that pass 2 filters
+snv <- fread("grep -v '^##' ~/PhD/Oncocytoma/data/unmatched/PDv37is_PD48545a_snp_vaf.tsv", header=T, data.table=F)
+#snv <- snv_raw[,grepl(c('Chrom|Pos|Ref|Alt|mutcode|MTR|DEP|VAF|germline|lowCov|Gene'),colnames(snv_raw))&!(colnames(snv_raw) %in% c("PDv37is_MTR","PDv37is_DEP","PDv37is_VAF"))]
+snv$mutCode <- paste(snv$Chrom,snv$Pos,snv$Ref,snv$Alt,sep="_")
+snv <- snv[snv$mutCode %in% pass_muts$mutCode,]
+snv$mutCoord <- paste(snv$Chrom,snv$Pos, sep='_')
+
+```
+
+
+#### Filtering step one: exact binomial test
+We'll now do our first filtering step using Tim's exact binomial test to sort out which variants are germline and which are somatic.  First, we'll load those scripts.
+```{r}
+source('~/PhD/General_scripts/tim_filtering_scripts.R')
+```
+
+Now we'll run the test.
+```{r}
+
+# First, prepare data
+Muts = paste(snv$Chrom,snv$Pos,snv$Ref,snv$Alt,sep="_")
+Genotype = snv[,grepl("VAF",colnames(snv))&colnames(snv)!="PDv37is_VAF"]
+NR = snv[,grepl("DEP",colnames(snv))&colnames(snv)!="PDv37is_DEP"]
+NV = snv[,grepl("MTR",colnames(snv))&colnames(snv)!="PDv37is_MTR"]
+
+# Next, run
+germline_tf_snv <- exact.binomial("female", NV, NR, cutoff = -5)
+
+# Lastly, add results to main df (TRUE = germline, FALSE = somatic)
+snv$germline <- germline_tf_snv
+
+```
+
+How many somatic and germline variants are there?
+```{r}
+table(snv$germline)
+```
+With the exact binomila test, we called 5352 somatic variants and 42701 germline variants across the four tumors and two normal tissue samples.
+
+
+#### Filtering step two: shearwater-like test
+Next, we'll run a shearwater-like test to remove sequencing artifacts found repeatedly across a panel of genetically unrelated samples.  If a mutation we called in any of this patient's samples is found reoccurently in a panel of unrelated samples, it's likely to be an artifact.  As our normal panel here, we're using a set of normal kidney samples sequenced and processed with the same protocols as the pediatric patient's samples.
+
+First, we'll prepare some files to feed into AlleleCounter
+```{r}
+
+# Vector of all sample names
+#samples=read.table("samples_all_final.txt")[,1] 
+samples=c('PD48545a','PD48545b','PD48545c',
+          'PD48545d','PD48545e','PD48545f')
+
+normal_samples <- c('PD48478b', 'PD48481b', 'PD48482b', 'PD48483b', 'PD48485b', 'PD48487b', 'PD48490b', 'PD48492b', 'PD48494b',
+                  'PD48495b', 'PD48476b', 'PD48477b', 'PD48480b', 'PD48484b', 'PD48496b', 'PD48474b', 'PD48486b', 'PD48489b',
+                  'PD48491b', 'PD48493b', 'PD48497b')
+
+all_samples <- c(samples,normal_samples)
+
+# "Bed" file of all mutations to be considered (across all patients)
+# Format: Chr Ref Pos Alt
+# we also need to write a plain list of coordinates
+
+# write.table(snv$mutCode, '~/PhD/Oncocytoma/alleleCounter/All_mutations_filtered.txt', quote = F, row.names = F, col.names = F)
+
+coords=paste(snv$Chrom,snv$Pos,sep="_")
+
+write.table(snv[,c('Chrom','Pos')], '~/PhD/Oncocytoma/pediatric_mutations.txt', quote = F, col.names = F, row.names = F)
+
+```
+
+
+Now we have to pause here to run alleleCounter using the scripts below (and included in the github):
+` . alleleCounter_adultOncos.sh `
+` . alleleCounter_pedsOncos.sh `
+
+
+If you were running this for the first time, you'd need to load in the alleleCounter results...
+```{r}
+
+# # Read in data from AlleleCounter
+# all_counts = array(0,dim=c(length(all_samples),length(coords),4),
+#                    dimnames=list(all_samples,coords,c("A","C","G","T")))
+# print(length(all_samples))
+# setwd('~/PhD/Oncocytoma/alleleCounter/')
+# for (k in 1:length(all_samples)){
+#   #Read in allele counts per sample
+#   if(file.exists(paste0("~/PhD/Oncocytoma/alleleCounter/",all_samples[k],"_allelereport.txt"))){
+#     data=read.table(paste0("~/PhD/Oncocytoma/alleleCounter/",all_samples[k],"_allelereport.txt"),comment.char = '',header=T)
+#     #to be safe, avoid dulicated mutations in bed file:
+#     muts_data=paste(data$X.CHR,data$POS,sep="_")
+#     data=data[!duplicated(muts_data),]
+#     muts_data=muts_data[!duplicated(muts_data)]
+#     rownames(data)=muts_data
+#     all_counts[k,,]=as.matrix(data[coords,3:6])
+#   }
+#   print(k)
+# }
+# 
+# # Vector of all different projects/patients
+# patients='PD48545'
+# for (patient in patients){
+#   shearwater_probability(patient=patient,save="~/PhD/Oncocytoma/alleleCounter/PD48545_shearwater_pval_mat.txt")
+# }
+```
+
+
+But because we've run that already, we can load the results in here and apply our filtering cutoffs (adjust scores with BH multi-test correction and then use a < .05 cutoff) 
+```{r}
+
+pval_mat <- as.matrix(fread("~/PhD/Oncocytoma/alleleCounter/PD48545_shearwater_pval_mat.txt"), rownames=1)
+
+#multi-test correction
+qval_mat=apply(pval_mat,2,function(x) p.adjust(x,method="BH",n = length(pval_mat)))
+
+# filter
+qval_mat_pass <- qval_mat[apply(qval_mat, 1, function(x) any(x < .05)), ]
+qval_mat_pass <- qval_mat_pass[complete.cases(qval_mat_pass),]
+
+```
+
+And then apply the filter to our main snv dataframe!
+```{r}
+
+snv$shearwaterPass <- ifelse(snv$mutCode %in% rownames(qval_mat_pass), TRUE, FALSE)
+
+```
+
+
+#### Filtering step thre: FFH test
+
+We'll run this for every renal sample versus blood.
+
+Starting with tumor A:
+```{r}
+# make a depth matrix
+depth_matrix <- snv[,c('PD48545a_DEP', 'PD48545b_DEP','PD48545c_DEP', 'PD48545d_DEP', 'PD48545e_DEP', 'PD48545f_DEP')]
+
+# test with tumor A
+tumorAvsBloodMTR <- chisq_matrix[,c("PD48545a_MTR","PD48545f_MTR")] ; colnames(tumorAvsBloodMTR) <- c('tumorA','blood')
+tumorAvsBloodDEP <- depth_matrix[,c("PD48545a_DEP","PD48545f_DEP")]; rownames(tumorAvsBloodDEP) <- rownames(tumorAvsBloodMTR) 
+tumorAvsBloodNOR <- tumorAvsBloodDEP - tumorAvsBloodMTR ; rownames(tumorAvsBloodNOR) <- rownames(tumorAvsBloodMTR) ; colnames(tumorAvsBloodNOR) <- c('tumorA','blood')
+
+
+for (i in 1:length(depth_matrix$PD48545a_DEP)) {
+  # make baby matrix
+  smolMatrix <- rbind(tumorAvsBloodMTR[i,],tumorAvsBloodNOR[i,]) 
+  rownames(smolMatrix) <- c('mutation_reads','normal_reads')
+  smol_out <- fisher.test(smolMatrix)
+  # make list of stats
+  if (exists("pval_list")) {
+    pval_list <- c(pval_list, smol_out$p.value)
+    estimate_list <- c(estimate_list, smol_out$estimate)
+    conf.int1_list <- c(conf.int1_list, smol_out$conf.int[1])
+    conf.int2_list <- c(conf.int2_list, smol_out$conf.int[2])
+  } else {
+    pval_list <- smol_out$p.value
+    estimate_list <- smol_out$estimate
+    conf.int1_list <- smol_out$conf.int[1]
+    conf.int2_list <- smol_out$conf.int[2]
+  }
+}
+
+fOuts_tumorAvsBlood <- cbind(pval_list, estimate_list, conf.int1_list, conf.int2_list); rownames(fOuts_tumorAvsBlood) <- rownames(chisq_matrix)
+colnames(fOuts_tumorAvsBlood) <- c('tumorAvsBlood_pval','tumorAvsBlood_est','tumorAvsBlood_conf1','tumorAvsBlood_conf2')
+
+
+write.table(fOuts_tumorAvsBlood,'~/PhD/Oncocytoma/fisherOuts_tumorAvsBlood.txt', row.names = T, col.names = T, quote = F, sep = '\t')
+
+### just run this if you've already made the files
+fOuts_tumorAvsBlood <- as.data.frame(fread('~/PhD/Oncocytoma/fisherOuts_tumorAvsBlood.txt'))
+
+
+rownames(fOuts_tumorAvsBlood) <- fOuts_tumorAvsBlood$V1; fOuts_tumorAvsBlood <- fOuts_tumorAvsBlood[,c('tumorAvsBlood_pval','tumorAvsBlood_est','tumorAvsBlood_conf1','tumorAvsBlood_conf2')]
+table(as.numeric(as.data.frame(fOuts_tumorAvsBlood)$tumorAvsBlood_pval) < .01)
+```
+
+And then repeat with tumor C:
+```{r}
+
+# set up with tumor C
+tumorCvsBloodMTR <- chisq_matrix[,c("PD48545c_MTR","PD48545f_MTR")] ; colnames(tumorCvsBloodMTR) <- c('tumorC','blood')
+tumorCvsBloodDEP <- depth_matrix[,c("PD48545c_DEP","PD48545f_DEP")]; rownames(tumorCvsBloodDEP) <- rownames(tumorCvsBloodMTR) 
+tumorCvsBloodNOR <- tumorCvsBloodDEP - tumorCvsBloodMTR ; rownames(tumorCvsBloodNOR) <- rownames(tumorCvsBloodMTR) ; colnames(tumorCvsBloodNOR) <- c('tumorC','blood')
+
+# clean up workplace
+rm(pval_list, estimate_list, conf.int1_list, conf.int2_list)
+
+for (i in 1:length(depth_matrix$PD48545a_DEP)) {
+  # make baby matrix
+  smolMatrix <- rbind(tumorCvsBloodMTR[i,],tumorCvsBloodNOR[i,]) 
+  rownames(smolMatrix) <- c('mutation_reads','normal_reads')
+  smol_out <- fisher.test(smolMatrix)
+  # make list of stats
+  if (exists("pval_list")) {
+    pval_list <- c(pval_list, smol_out$p.value)
+    estimate_list <- c(estimate_list, smol_out$estimate)
+    conf.int1_list <- c(conf.int1_list, smol_out$conf.int[1])
+    conf.int2_list <- c(conf.int2_list, smol_out$conf.int[2])
+  } else {
+    pval_list <- smol_out$p.value
+    estimate_list <- smol_out$estimate
+    conf.int1_list <- smol_out$conf.int[1]
+    conf.int2_list <- smol_out$conf.int[2]
+  }
+}
+
+fOuts_tumorCvsBlood <- cbind(pval_list, estimate_list, conf.int1_list, conf.int2_list); rownames(fOuts_tumorCvsBlood) <- rownames(chisq_matrix)
+colnames(fOuts_tumorCvsBlood) <- c('tumorCvsBlood_pval','tumorCvsBlood_est','tumorCvsBlood_conf1','tumorCvsBlood_conf2')
+
+write.table(fOuts_tumorCvsBlood,'~/PhD/Oncocytoma/fisherOuts_tumorCvsBlood.txt', row.names = T, col.names = T, quote = F, sep = '\t')
+
+
+### just run this if you've already made the files
+fOuts_tumorCvsBlood <- as.data.frame(fread('~/PhD/Oncocytoma/fisherOuts_tumorCvsBlood.txt'))
+rownames(fOuts_tumorCvsBlood) <- fOuts_tumorCvsBlood$V1; fOuts_tumorCvsBlood <- fOuts_tumorCvsBlood[,c('tumorCvsBlood_pval','tumorCvsBlood_est','tumorCvsBlood_conf1','tumorCvsBlood_conf2')]
+
+
+table(as.numeric(as.data.frame(fOuts_tumorCvsBlood)$tumorCvsBlood_pval) < .01)
+
+```
+
+
+And for tumor D:
+```{r}
+
+# test with tumor A
+tumorDvsBloodMTR <- chisq_matrix[,c("PD48545d_MTR","PD48545f_MTR")] ; colnames(tumorDvsBloodMTR) <- c('tumorD','blood')
+tumorDvsBloodDEP <- depth_matrix[,c("PD48545d_DEP","PD48545f_DEP")]; rownames(tumorDvsBloodDEP) <- rownames(tumorDvsBloodMTR) 
+tumorDvsBloodNOR <- tumorDvsBloodDEP - tumorDvsBloodMTR ; rownames(tumorDvsBloodNOR) <- rownames(tumorDvsBloodMTR) ; colnames(tumorDvsBloodNOR) <- c('tumorD','blood')
+
+rm(pval_list, estimate_list, conf.int1_list, conf.int2_list)
+
+for (i in 1:length(depth_matrix$PD48545a_DEP)) {
+  # make baby matrix
+  smolMatrix <- rbind(tumorDvsBloodMTR[i,],tumorDvsBloodNOR[i,]) 
+  rownames(smolMatrix) <- c('mutation_reads','normal_reads')
+  smol_out <- fisher.test(smolMatrix)
+  # make list of stats
+  if (exists("pval_list")) {
+    pval_list <- c(pval_list, smol_out$p.value)
+    estimate_list <- c(estimate_list, smol_out$estimate)
+    conf.int1_list <- c(conf.int1_list, smol_out$conf.int[1])
+    conf.int2_list <- c(conf.int2_list, smol_out$conf.int[2])
+  } else {
+    pval_list <- smol_out$p.value
+    estimate_list <- smol_out$estimate
+    conf.int1_list <- smol_out$conf.int[1]
+    conf.int2_list <- smol_out$conf.int[2]
+  }
+}
+
+fOuts_tumorDvsBlood <- cbind(pval_list, estimate_list, conf.int1_list, conf.int2_list); rownames(fOuts_tumorDvsBlood) <- rownames(chisq_matrix)
+colnames(fOuts_tumorDvsBlood) <- c('tumorDvsBlood_pval','tumorDvsBlood_est','tumorDvsBlood_conf1','tumorDvsBlood_conf2')
+
+
+write.table(fOuts_tumorDvsBlood,'~/PhD/Oncocytoma/fisherOuts_tumorDvsBlood.txt', row.names = T, col.names = T, quote = F, sep = '\t')
+fOuts_tumorDvsBlood <- as.data.frame(fread('~/PhD/Oncocytoma/fisherOuts_tumorDvsBlood.txt'))
+rownames(fOuts_tumorDvsBlood) <- fOuts_tumorDvsBlood$V1; fOuts_tumorDvsBlood <- fOuts_tumorDvsBlood[,c('tumorDvsBlood_pval','tumorDvsBlood_est','tumorDvsBlood_conf1','tumorDvsBlood_conf2')]
+
+
+table(as.numeric(as.data.frame(fOuts_tumorDvsBlood)$tumorDvsBlood_pval) < .01)
+
+```
+
+And for tumor E:
+```{r}
+
+# set up for tumor E
+tumorEvsBloodMTR <- chisq_matrix[,c("PD48545e_MTR","PD48545f_MTR")] ; colnames(tumorEvsBloodMTR) <- c('tumorE','blood')
+tumorEvsBloodDEP <- depth_matrix[,c("PD48545e_DEP","PD48545f_DEP")]; rownames(tumorEvsBloodDEP) <- rownames(tumorEvsBloodMTR) 
+tumorEvsBloodNOR <- tumorEvsBloodDEP - tumorEvsBloodMTR ; rownames(tumorEvsBloodNOR) <- rownames(tumorEvsBloodMTR) ; colnames(tumorEvsBloodNOR) <- c('tumorE','blood')
+
+rm(pval_list, estimate_list, conf.int1_list, conf.int2_list)
+
+for (i in 1:length(depth_matrix$PD48545a_DEP)) {
+  # make baby matrix
+  smolMatrix <- rbind(tumorEvsBloodMTR[i,],tumorEvsBloodNOR[i,]) 
+  rownames(smolMatrix) <- c('mutation_reads','normal_reads')
+  smol_out <- fisher.test(smolMatrix)
+  # make list of stats
+  if (exists("pval_list")) {
+    pval_list <- c(pval_list, smol_out$p.value)
+    estimate_list <- c(estimate_list, smol_out$estimate)
+    conf.int1_list <- c(conf.int1_list, smol_out$conf.int[1])
+    conf.int2_list <- c(conf.int2_list, smol_out$conf.int[2])
+  } else {
+    pval_list <- smol_out$p.value
+    estimate_list <- smol_out$estimate
+    conf.int1_list <- smol_out$conf.int[1]
+    conf.int2_list <- smol_out$conf.int[2]
+  }
+}
+
+fOuts_tumorEvsBlood <- cbind(pval_list, estimate_list, conf.int1_list, conf.int2_list); rownames(fOuts_tumorEvsBlood) <- rownames(chisq_matrix)
+colnames(fOuts_tumorEvsBlood) <- c('tumorEvsBlood_pval','tumorEvsBlood_est','tumorEvsBlood_conf1','tumorEvsBlood_conf2')
+
+write.table(fOuts_tumorEvsBlood,'~/PhD/Oncocytoma/fisherOuts_tumorEvsBlood.txt', row.names = T, col.names = T, quote = F, sep = '\t')
+
+# start here if has been alredy run
+fOuts_tumorEvsBlood <- as.data.frame(fread('~/PhD/Oncocytoma/fisherOuts_tumorEvsBlood.txt'))
+rownames(fOuts_tumorEvsBlood) <- fOuts_tumorEvsBlood$V1; fOuts_tumorEvsBlood <- fOuts_tumorEvsBlood[,c('tumorEvsBlood_pval','tumorEvsBlood_est','tumorEvsBlood_conf1','tumorEvsBlood_conf2')]
+
+
+table(as.numeric(as.data.frame(fOuts_tumorEvsBlood)$tumorEvsBlood_pval) < .01)
+
+```
+
+Normal kidney?
+```{r}
+
+# test with tumor A
+normKidvsBloodMTR <- chisq_matrix[,c("PD48545b_MTR","PD48545f_MTR")] ; colnames(normKidvsBloodMTR) <- c('normKid','blood')
+normKidvsBloodDEP <- depth_matrix[,c("PD48545b_DEP","PD48545f_DEP")]; rownames(normKidvsBloodDEP) <- rownames(normKidvsBloodMTR) 
+normKidvsBloodNOR <- normKidvsBloodDEP - normKidvsBloodMTR ; rownames(normKidvsBloodNOR) <- rownames(normKidvsBloodMTR) ; colnames(normKidvsBloodNOR) <- c('normKid','blood')
+
+rm(pval_list, estimate_list, conf.int1_list, conf.int2_list)
+
+for (i in 1:length(depth_matrix$PD48545a_DEP)) {
+  # make baby matrix
+  smolMatrix <- rbind(normKidvsBloodMTR[i,],normKidvsBloodNOR[i,]) 
+  rownames(smolMatrix) <- c('mutation_reads','normal_reads')
+  smol_out <- fisher.test(smolMatrix)
+  # make list of stats
+  if (exists("pval_list")) {
+    pval_list <- c(pval_list, smol_out$p.value)
+    estimate_list <- c(estimate_list, smol_out$estimate)
+    conf.int1_list <- c(conf.int1_list, smol_out$conf.int[1])
+    conf.int2_list <- c(conf.int2_list, smol_out$conf.int[2])
+  } else {
+    pval_list <- smol_out$p.value
+    estimate_list <- smol_out$estimate
+    conf.int1_list <- smol_out$conf.int[1]
+    conf.int2_list <- smol_out$conf.int[2]
+  }
+}
+
+fOuts_normKidvsBlood <- cbind(pval_list, estimate_list, conf.int1_list, conf.int2_list); rownames(fOuts_normKidvsBlood) <- rownames(chisq_matrix)
+colnames(fOuts_normKidvsBlood) <- c('kidVsBlood_pval','kidVsBlood_est','kidVsBlood_conf1','kidVsBlood_conf2')
+
+write.table(fOuts_normKidvsBlood,'~/PhD/Oncocytoma/fisherOuts_normKidvsBlood.txt', row.names = T, col.names = T, quote = F, sep = '\t')
+
+# just start here if it's been already run
+fOuts_normKidvsBlood <- as.data.frame(fread('~/PhD/Oncocytoma/fisherOuts_normKidvsBlood.txt'))
+rownames(fOuts_normKidvsBlood) <- fOuts_normKidvsBlood$V1; fOuts_normKidvsBlood <- fOuts_normKidvsBlood[,c('kidVsBlood_pval','kidVsBlood_est','kidVsBlood_conf1','kidVsBlood_conf2')]
+
+
+
+table(as.numeric(as.data.frame(fOuts_normKidvsBlood)$kidVsBlood_pval) < .01)
+
+
+```
+
+
+Then we'll combine each of those results dataframes into one large report of the FFH outputs.
+```{r}
+
+fOuts_all <- as.data.frame(cbind(fOuts_tumorAvsBlood,fOuts_tumorCvsBlood,fOuts_tumorDvsBlood,fOuts_tumorEvsBlood,fOuts_normKidvsBlood))
+
+write.table(fOuts_all, '~/PhD/Oncocytoma/fisherOuts_all.txt', row.names = T, col.names = T, quote = F, sep = '\t')
+
+
+```
+
+### Shared mutations
+
+Select shared mutations 
+```{r}
+fOuts_filt <- fOuts_all[fOuts_all$tumorAvsBlood_pval < .01 & fOuts_all$tumorCvsBlood_pval < .01 & fOuts_all$tumorDvsBlood_pval < .01 & fOuts_all$tumorEvsBlood_pval < .01 &
+                          fOuts_all$tumorAvsBlood_est > 3 & fOuts_all$tumorCvsBlood_est > 3 & fOuts_all$tumorDvsBlood_est > 3 & fOuts_all$tumorEvsBlood_est > 3,]
+
+```
+
+And lastly, we'll integrate this into our main snv dataframe
+```{r}
+
+# first call any mutations with a significantly different number of reads when compared to blood
+anySigDiff <- subset(fOuts_all, rowSums(fOuts_all[,grepl("pval",colnames(fOuts_all))] < .01, na.rm = TRUE) > 0)
+
+# make sure none of the samples have significant differences in mutation counts AND 
+# make sure there are no differences between blood and normal kidney
+snv$fisherGermlineTest <- ifelse(!(snv$mutCode %in% rownames(anySigDiff)) & snv$mutCode %in% rownames(fOuts_all[fOuts_all$kidVsBlood_pval > .1,]) , 'fisherGermline','fisherSomatic')
+
+#snv$fisherGermlineTest <- ifelse(!(snv$mutCode %in% rownames(anySigDiff)), 'fisherGermline','fisherSomatic')
+
+
+snv_germline <- snv[snv$fisherGermlineTest == 'fisherGermline' & snv$shearwaterPass == TRUE & snv$germline == TRUE,]
+
+snv_somatic <- snv[snv$fisherGermlineTest == 'fisherSomatic' & snv$shearwaterPass == TRUE & snv$germline == FALSE,]
+
+```
+
+And as the very last step, we'll combine it all with a cutoff to exclude variatns that are either very low or very high coverage, whicuh are highly likely to be junk. 
+```{r}
+snv_somatic_cov <- subset(snv_somatic, rowSums(snv_somatic[,grepl("DEP",colnames(snv_somatic))] > 15 & snv_somatic[,grepl("DEP",colnames(snv_somatic))] < 150, na.rm = TRUE) > 0)
+
+snv_somatic_cov <- snv_somatic[rowSums(snv_somatic[,grepl("DEP",colnames(snv_somatic))]) < 750,]
+
+snv_somatic_cov <- snv_somatic[snv_somatic$PD48545a_DEP > 10 & snv_somatic$PD48545a_DEP < 120 &
+                                 snv_somatic$PD48545b_DEP > 10 & snv_somatic$PD48545b_DEP < 120 &
+                                 snv_somatic$PD48545c_DEP > 10 & snv_somatic$PD48545c_DEP < 120 &
+                                 snv_somatic$PD48545d_DEP > 10 & snv_somatic$PD48545d_DEP < 120 & 
+                                 snv_somatic$PD48545e_DEP > 10 & snv_somatic$PD48545e_DEP < 120 &
+                                 snv_somatic$PD48545f_DEP > 10 & snv_somatic$PD48545f_DEP < 120,]
+
+
+
+write.table(snv_somatic_cov, '~/PhD/Oncocytoma/pedSomatic_filtered_2023-11-06.txt', quote = F, row.names = F, col.names =T, sep = '\t')
+
+selected_col_snv <- snv_somatic_cov[,grepl(c('mutCode|Chrom|Pos|Ref|Alt|MTR|DEP|VAF|Transcript|Type|Effect|germline|lowCov|Gene|shear|fish'),colnames(snv_somatic_cov))&!(colnames(snv_somatic_cov) %in% c("PDv37is_MTR","PDv37is_DEP","PDv37is_VAF"))]
+
+write.table(selected_col_snv, '~/PhD/Oncocytoma/drafts/supData/pedSomatic_filteredCols_2023-11-06.txt', quote = F, row.names = F, col.names =T, sep = '\t')
+
+```
