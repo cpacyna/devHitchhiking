@@ -253,17 +253,29 @@ head(fgseaResHallmark)
 ```
 
 
-Do we have any significant gene programs?  We're using a padj cutoff of < .05 and a net effect score threshold of > 1.5.
+Do we have any interesting gene programs?  We're using a padj cutoff of < .05 and a net effect score threshold of > 1.5.
 ```{r}
 
 sig_fgseaResHallmark <- fgseaResHallmark[fgseaResHallmark$padj < .05 & abs(fgseaResHallmark$NES) > 1.5,]
 
 ```
 
-Make a pretty comparison chart using fgsea's built-in plot tool.
+Make a comparison chart using fgsea's built-in plot tool.
 ```{r}
 
 plotGseaTable(pathways[sig_fgseaResHallmark[order(sig_fgseaResHallmark$NES, decreasing = T),]$pathway], ranks_normPanel, fgseaResHallmark, gseaParam = 0.5)
+
+```
+
+Create a nicer enrichment plot of any significantly enriched (padj < .05) pathways with |NES| > 1.25.
+```{r}
+fgseaResOrdered$pathway <- factor(x = fgseaResOrdered$pathway, levels = fgseaResOrdered[order(fgseaResOrdered$NES, decreasing = F),]$pathway)
+
+ggplot(data = fgseaResOrdered[abs(fgseaResOrdered$NES) > 1.4 & !(is.na(fgseaResOrdered$log2err)),], aes(x = NES, y = pathway)) + 
+  geom_point(aes(size = (1 + (1 - fgseaResOrdered[abs(fgseaResOrdered$NES) > 1.4 & !(is.na(fgseaResOrdered$log2err)),]$padj) * (5 - 1)), color = NES)) + 
+  guides(size = guide_legend(title = "Padj")) +
+  scale_color_gradient2(low='#395572ff', mid = 'white', high = '#6d3654ff', midpoint = 0) +
+  theme_classic()
 
 ```
 
