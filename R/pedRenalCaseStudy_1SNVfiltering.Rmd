@@ -64,6 +64,7 @@ How many somatic and germline variants are there?
 ```{r}
 table(snv$germline)
 ```
+With the exact binomial test, we called 5352 somatic variants and 42701 germline variants across the four tumors and two normal tissue samples.
 
 Are there any germline coding variants in renal cancer predisposition genes?  We'll check in VHL, FH, TSC1, TSC2, FLCN, SDHA, SDHB, SDHC, SDHD, BAP1, and PTEN.
 
@@ -84,7 +85,6 @@ snv[snv$germline == FALSE & snv$Gene == 'FLCN' ,]
 No. So, our analysis agrees with clinical WGS tests in finding that there are no germline mutations predisposing this patient's disease.
 
 
-Let's proceed.  With the exact binomial test, we called 5352 somatic variants and 42701 germline variants across the four tumors and two normal tissue samples.
 
 
 #### Filtering step two: shearwater-like test
