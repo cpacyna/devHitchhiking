@@ -64,7 +64,27 @@ How many somatic and germline variants are there?
 ```{r}
 table(snv$germline)
 ```
-With the exact binomila test, we called 5352 somatic variants and 42701 germline variants across the four tumors and two normal tissue samples.
+
+Are there any germline coding variants in renal cancer predisposition genes?  We'll check in VHL, FH, TSC1, TSC2, FLCN, SDHA, SDHB, SDHC, SDHD, BAP1, and PTEN.
+
+```{r}
+renalGPV <- c('FH','TSC1', 'TSC2', 'FLCN', 'SDHA', 'SDHB', 'SDHC', 'SDHD', 'BAP1', 'PTEN')
+snv[snv$germline == TRUE & snv$Gene %in% renalGPV & !(snv$CDS == '-'),]
+
+
+```
+There are two potentially interesting coding germline mutations, but ultimately they are unlikely to have a tumorigenic effect. The SDHA variant is silent, so will not affect coding sequencing. The missense mutation in FLCN is not in a location of the protein known to be associated with renal disease — there are 3 cancer cases reported in COSMIC with the same variant but none are renal tumors.  Birt-Hogg-Dubé is usually caused by frameshift mutaitons in a differnet part of the gene; missense mutations in this location have not been associated with BHD.
+
+To be doubly sure, let's check for somatic FLCN mutations as well (to have an oncogenic effect, both copies of FLCN must be lost, typically through one germline mutation to one allele and one sporadic somatic mutation to the other).  Do any of the tumors have any somatic mutations in FLCN?
+
+```{r}
+snv[snv$germline == FALSE & snv$Gene == 'FLCN' ,]
+```
+
+No. So, our analysis agrees with clinical WGS tests in finding that there are no germline mutations predisposing this patient's disease.
+
+
+Let's proceed.  With the exact binomial test, we called 5352 somatic variants and 42701 germline variants across the four tumors and two normal tissue samples.
 
 
 #### Filtering step two: shearwater-like test
