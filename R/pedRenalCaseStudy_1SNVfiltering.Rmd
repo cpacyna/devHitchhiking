@@ -69,7 +69,7 @@ With the exact binomial test, we called 5352 somatic variants and 42701 germline
 Are there any germline coding variants in renal cancer predisposition genes?  We'll check in VHL, FH, TSC1, TSC2, FLCN, SDHA, SDHB, SDHC, SDHD, BAP1, and PTEN.
 
 ```{r}
-renalGPV <- c('FH','TSC1', 'TSC2', 'FLCN', 'SDHA', 'SDHB', 'SDHC', 'SDHD', 'BAP1', 'PTEN')
+renalGPV <- c('VHL','FH','TSC1', 'TSC2', 'FLCN', 'SDHA', 'SDHB', 'SDHC', 'SDHD', 'BAP1', 'PTEN')
 snv[snv$germline == TRUE & snv$Gene %in% renalGPV & !(snv$CDS == '-'),]
 
 
